@@ -195,3 +195,44 @@ We set `min_replicas=1` because candidate traffic starts at a fractional share (
 
 ### Part C Limitations and Items Not Tested
 * **Autoscaling Scale-Up Under Load:** The candidate autoscaling configuration was deployed and verified, but the verification workload did not generate enough sustained concurrency to trigger a replica scale-up event from 1 to 2 or 3. Scale-up behavior under heavy load remains configured but not exercised.
+
+---
+
+## Part D: Automated Release Gate & Abort Criteria
+
+### D1. Smoke Test Execution (`smoke_eta.py`)
+
+The smoke test implements automated release gating before real traffic is routed to a newly deployed service. It evaluates basic availability, release identity, batch-single consistency, domain monotonicity, input validation, and latency SLO compliance.
+
+#### Verification Runs:
+
+1. **Passing Release Check (`--expect-version v1`):**
+   * Output: `SMOKE TEST PASSED (8/8 checks)`
+   * `[PASS]` HTTP 200 with valid positive ETA (`102.0 min`)
+   * `[PASS]` Model version matched expected release (`v1`)
+   * `[PASS]` Batch consistency: `batch=[37.5, 127.8, 256.8]` matched single evaluations
+   * `[PASS]` Distance monotonicity: `[5, 20, 50, 100] km` $\to$ `[37.5, 76.2, 153.6, 282.6] min`
+   * `[PASS]` Traffic monotonicity: `[0.1, 0.5, 0.9]` $\to$ `[84.9, 102.0, 119.1] min`
+   * `[PASS]` Stop count monotonicity: `[2, 8, 15]` $\to$ `[89.0, 115.0, 145.3] min`
+   * `[PASS]` Input validation: out-of-range negative distance returned HTTP 422
+   * `[PASS]` Latency threshold: measured $p95 = 5.1\text{ ms} \le 80.0\text{ ms}$
+   * **Exit Code:** `0` (Deployment approved)
+
+2. **Negative Control Verification (`--expect-version v2` against v1 server):**
+   * Output: `[FAIL] model version matches --expect-version: served=v1 expected=v2`
+   * Result: `SMOKE TEST FAILED (7/8 checks)`
+   * **Exit Code:** `1` (Deployment automatically blocked)
+
+---
+
+### D2. Four Production Canary Abort Criteria (10% Rollout of v2)
+
+During a 10% canary rollout of `v2`, the deployment controller monitors real-time telemetry and is configured to trigger an automatic rollback to `v1` if any of the following conditions are met:
+
+| # | Telemetry Metric | Rollback / Abort Threshold | Evaluation Window | Rationale |
+|:---:|:---|:---|:---|:---|
+| **1** | **HTTP 5xx Server Error Rate** | Canary error rate $> 1.0\%$ (or $> 2\times$ production baseline error rate) | Rolling 5-minute window (minimum 200 canary requests) | Detects unhandled runtime exceptions, memory faults, or worker crashes introduced by candidate code under live traffic. |
+| **2** | **Canary Tail Latency (p95)** | $p95 > 80\text{ ms}$ (SLO breach) or $> 1.5\times$ baseline `prod` p95 | 2 consecutive 5-minute rolling evaluation windows | Prevents customer latency degradation. Requiring two consecutive breaches reduces premature rollbacks caused by temporary network spikes. |
+| **3** | **Live Prediction Divergence** | Mean Absolute Difference against shadow $> 12\text{ min}$, or $> 50\%$ of requests differing by $> 10\text{ min}$ | Rolling 15-minute window (minimum 500 mirrored requests) | Detects unexpected distribution drift or inconsistencies in feature transformations that cause predictions to deviate substantially from offline shadow baselines. |
+| **4** | **Ground-Truth Delivery Error (Real-Time MAE)** | Candidate MAE degrades $> 5\%$ relative to `prod` overall or on rush-hour/rain slices | Rolling 1-hour window of completed deliveries (minimum 500 completed parcels per arm) | Evaluates actual prediction accuracy against final package delivery times once couriers log completion, helping protect performance on critical customer-sensitive slices. |
+
