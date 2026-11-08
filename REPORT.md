@@ -43,7 +43,7 @@ Peak throughput occurs at concurrency 1 (385.0 RPS). Increasing concurrency to 2
 #### 2. Reasoning via Little's Law (L = lambda * W)
 In a closed-loop load generation model, L represents the number of concurrent clients, lambda is throughput in requests per second (RPS), and W is the average response time per request (W = L / lambda). At concurrency 1, W = 1 / 385.0 = 2.59 ms, which closely matches the measured p50 latency of 2.5 ms.
 
-In a single-process Python/Uvicorn server running on a CPU-bound workload, Python's Global Interpreter Lock (GIL) constrains execution to a single core. Furthermore, because both the load generator and the Uvicorn server run inside the same VM, adding concurrent simulated clients causes CPU contention, thread starvation, and context-switching overhead. Once the server reaches maximum throughput (X_max), throughput stops growing. According to Little's Law, when lambda is fixed at X_max, average latency scales directly with queue depth: W = L / X_max. Additional concurrent clients simply queue up waiting for the single Python thread, leading to queue growth that causes p95 latency to jump to 606.1 ms at concurrency 2 and over 3600 ms at concurrency 16.
+In a single-process Python/Uvicorn server running on a CPU-bound workload, Python's Global Interpreter Lock (GIL) constrains execution to a single core. Furthermore, because both the load generator and the Uvicorn server run inside the same VM, adding concurrent simulated clients causes CPU contention, thread starvation, and context-switching overhead. Once the server reaches maximum throughput (X_max), throughput stops growing. According to Little's Law, when lambda is fixed at X_max, average latency scales directly with queue depth: W = L / X_max. As concurrency increases, additional in-flight requests experience longer waits as the service approaches its throughput limit. This queueing effect, combined with CPU contention and scheduling overhead within the shared VM, is consistent with the observed increase in p95 latency to 606.1 ms at concurrency 2 and over 3600 ms at concurrency 16.
 
 #### 3. Capacity Under SLO (p95 <= 80 ms)
 * Concurrency 1: p95 = 3.2 ms <= 80 ms (PASS)
@@ -75,7 +75,7 @@ Evaluated with duration = 4s at concurrency 1:
 
 ### A3.4 Optimization: Multi-Worker Deployment (--workers 2)
 
-To resolve the single-core GIL bottleneck, Uvicorn was configured with two worker processes across the available CPU cores (uvicorn eta_app:app --port 8000 --log-level warning --workers 2).
+To address the single-worker GIL bottleneck, Uvicorn was configured with two worker processes, which the operating system can schedule independently across the VM's eight assigned CPU cores (uvicorn eta_app:app --port 8000 --log-level warning --workers 2).
 
 #### Multi-Worker Load Test Results:
 
@@ -102,14 +102,14 @@ Latency distributions in networked services are heavily right-skewed, characteri
 ## Limitations and Items Not Tested
 * Prometheus Worker Aggregation: Under --workers 2, the Prometheus metrics endpoint exposes per-process values rather than aggregated counters across all workers.
 * VM Measurement Noise: The load generator and server were co-located on the same VirtualBox virtual machine, causing CPU contention at higher client counts.
-* Lecture Re-use Citation: None (implemented directly from starter contract specifications).
+* Implementation Basis: The implementation followed the starter contract specifications; no lecture material was reused.
 
 ---
 
 ## Part B: MLflow Registry, Promotion Gate & Shadow Comparison
 
 ### B1. Model Registration Table
-Both bundles were wrapped inside a custom MLflow `pyfunc` (`EtaPyfunc`) returning `eta_minutes` (rounded to one decimal place) and `model_version`, logged with input examples, model signatures, and pinned environment requirements to a local SQLite backend tracking store (`mlflow.db`)[cite: 4, 17].
+Both bundles were wrapped inside a custom MLflow `pyfunc` (`EtaPyfunc`) returning `eta_minutes` (rounded to one decimal place) and `model_version`, logged with input examples, model signatures, and pinned environment requirements to a local SQLite backend tracking store (`mlflow.db`).
 
 | Version | Model Alias | Bundle / Architecture |
 |:---:|:---:|:---:|
@@ -120,38 +120,38 @@ Both bundles were wrapped inside a custom MLflow `pyfunc` (`EtaPyfunc`) returnin
 
 ### B2. Multi-Criteria Promotion Gate Results
 
-The pure decision function `decide()` evaluates relative overall MAE improvement ($\ge 3\%$), candidate single-row latency ($p95 \le 10\text{ ms}$), and slice regression ($\le 5\%$ relative degradation on rush-hour and rain slices)[cite: 4, 18]. The slice regression rule is evaluated relative to production slice error ($MAE_{\text{cand}} \le MAE_{\text{prod}} \times 1.05$)[cite: 18].
+The pure decision function `decide()` evaluates relative overall MAE improvement ($\ge 3\%$), candidate single-row latency ($p95 \le 10\text{ ms}$), and slice regression ($\le 5\%$ relative degradation on rush-hour and rain slices). The slice regression rule is evaluated relative to production slice error ($MAE_{\text{cand}} \le MAE_{\text{prod}} \times 1.05$).
 
 #### 1. Default Thresholds (`min_rel_gain=0.03`, `max_p95_ms=10.0`, `max_slice_regression=0.05`):
-* **Gate Verdict:** `promote: true`[cite: 18]
+* **Gate Verdict:** `promote: true`
 * **Measured Metrics:**
-  * Relative MAE Gain: **48.94%** (prod MAE: 11.96 min vs cand MAE: 6.10 min; threshold $\ge 3\%$) $\rightarrow$ **PASS**[cite: 18]
-  * Candidate Single-Row Latency: **1.36 ms** (threshold $\le 10.0\text{ ms}$) $\rightarrow$ **PASS**[cite: 18]
-  * Rush Hour Slice (hours 7–9, 16–19): MAE dropped from 19.68 min to 8.58 min (-56.4% change) $\rightarrow$ **PASS (No regression)**[cite: 18]
-  * Rain Slice (`rain == 1`): MAE dropped from 11.62 min to 6.29 min (-45.9% change) $\rightarrow$ **PASS (No regression)**[cite: 18]
+  * Relative MAE Gain: **48.94%** (prod MAE: 11.96 min vs cand MAE: 6.10 min; threshold $\ge 3\%$) $\rightarrow$ **PASS**
+  * Candidate Single-Row Latency: **1.36 ms** (threshold $\le 10.0\text{ ms}$) $\rightarrow$ **PASS**
+  * Rush Hour Slice (hours 7–9, 16–19): MAE dropped from 19.68 min to 8.58 min (-56.4% change) $\rightarrow$ **PASS (No regression)**
+  * Rain Slice (`rain == 1`): MAE dropped from 11.62 min to 6.29 min (-45.9% change) $\rightarrow$ **PASS (No regression)**
 
 #### 2. Strict Threshold Run (`--min-rel-gain 0.60`):
-* **Gate Verdict:** `promote: false`[cite: 18]
-* **Failure Analysis:** The relative gain criterion failed (`overall_mae_gain: false`) because the measured relative improvement of 48.94% (0.489) fell below the required 60.0% (0.60) threshold, while latency and slice criteria remained satisfied[cite: 18]. This confirms the promotion gate strictly enforces its input parameters[cite: 18].
+* **Gate Verdict:** `promote: false`
+* **Failure Analysis:** The relative gain criterion failed (`overall_mae_gain: false`) because the measured relative improvement of 48.94% (0.489) fell below the required 60.0% (0.60) threshold, while latency and slice criteria remained satisfied. This confirms the promotion gate strictly enforces its input parameters.
 
 ---
 
 ### B3. Shadow Comparison & Production Decision
 
-Evaluated over 200 identical single-row requests from `data/eta_fresh.csv` against both models concurrently[cite: 4, 19]:
+Evaluated over 200 identical single-row requests from `data/eta_fresh.csv` against both models concurrently:
 * **(i) Mean Absolute Difference ($|\text{prod} - \text{candidate}|$):** 9.48 minutes
-* **(ii) Share of Requests Differing by $> 10$ minutes:** 35.0%[cite: 19]
+* **(ii) Share of Requests Differing by $> 10$ minutes:** 35.0%
 * **(iii) Inference Latency (p95):**
-  * `prod` (v1 on port 5101): **5.1 ms**[cite: 19]
-  * `candidate` (v2 on port 5102): **5.3 ms**[cite: 19]
+  * `prod` (v1 on port 5101): **5.1 ms**
+  * `candidate` (v2 on port 5102): **5.3 ms**
 * **Overall Mean Predictions:** `prod`: 118.9 min | `candidate`: 119.0 min
 
-#### Decision on Candidate Promotion (~5 Sentences):
-The shadow run reveals a notable 9.48-minute mean absolute difference, with 35.0% of predictions deviating by more than 10 minutes between `v1` and `v2`[cite: 19]. This divergence is expected and desirable: the promotion gate proved that candidate `v2` reduces overall prediction error by 48.9% (cutting MAE from 11.96 down to 6.10 minutes) and significantly improves tough slices like rush hour (19.68 to 8.58 minutes), rather than behaving erratically[cite: 18]. Furthermore, `v2` introduces virtually zero latency penalty, maintaining a 5.3 ms p95 compared to `v1`'s 5.1 ms—well beneath the 10 ms gate threshold[cite: 18, 19]. Based on these empirical metrics, candidate `v2` should be promoted to production[cite: 18, 19]. Rather than executing an abrupt all-at-once switch, the rollout should proceed via a controlled sticky canary (as in Part C) to monitor real-time delivery outcomes while preventing jarring ETA jumps for active customers[cite: 19, 20].
+#### Candidate Promotion Decision:
+The shadow run reveals a notable 9.48-minute mean absolute difference, with 35.0% of predictions deviating by more than 10 minutes between `v1` and `v2`. This divergence is expected and desirable: the promotion gate proved that candidate `v2` reduces overall prediction error by 48.9% (cutting MAE from 11.96 down to 6.10 minutes) and significantly improves performance on challenging slices such as rush-hour periods (19.68 to 8.58 minutes), rather than behaving erratically. Furthermore, `v2` introduces virtually zero latency penalty, maintaining a 5.3 ms p95 compared to `v1`'s 5.1 ms—well beneath the 10 ms gate threshold. Based on these empirical metrics, candidate `v2` should be promoted to production. Rather than executing an abrupt all-at-once switch, the rollout should proceed via a controlled sticky canary (as in Part C) to monitor real-time delivery outcomes while reducing abrupt ETA changes for active customers.
 
 #### Alias Immutability in Running Servers:
-Moving an alias in the MLflow Model Registry changes only the metadata pointer in the backend database (`mlflow.db`)[cite: 17, 19]. When `mlflow models serve -m "models:/eta-model@prod"` starts, it resolves the alias to a specific version exactly once, pulls the model artifacts, instantiates the Python model object in RAM, and serves traffic from memory[cite: 19]. Because the running server process does not continually poll the tracking database, reassigned aliases have no effect on an existing server process[cite: 19].
+Moving an alias in the MLflow Model Registry changes only the metadata pointer in the backend database (`mlflow.db`). When `mlflow models serve -m "models:/eta-model@prod"` starts, it resolves the alias to a specific version exactly once, pulls the model artifacts, instantiates the Python model object in RAM, and serves traffic from memory. Because the running server process does not continually poll the tracking database, reassigned aliases have no effect on an existing server process.
 
 #### Zero-Downtime Update Strategies:
-1. **Blue/Green or Rolling Deployment:** Spin up a new model server fleet resolving the newly updated alias[cite: 19]. Once the new instances pass automated health and smoke checks, the routing layer (or load balancer) shifts inbound traffic to the new instances, followed by draining and terminating the legacy servers without dropping in-flight requests[cite: 19].
-2. **In-Process Dynamic Hot-Reloading:** The model service worker runs a background polling thread or listens for webhook notifications from the registry[cite: 19]. When an alias target changes, it downloads and instantiates the new model object in memory and performs an atomic pointer swap[cite: 19]. In-flight requests conclude on the old model reference, while subsequent requests immediately use the new version[cite: 19].
+1. **Blue/Green or Rolling Deployment:** Spin up a new model server fleet resolving the newly updated alias. Once the new instances pass automated health and smoke checks, the routing layer (or load balancer) shifts inbound traffic to the new instances, followed by draining and terminating the legacy servers without dropping in-flight requests.
+2. **In-Process Dynamic Hot-Reloading:** The model service worker runs a background polling thread or listens for webhook notifications from the registry. When an alias target changes, it downloads and instantiates the new model object in memory and performs an atomic pointer swap. In-flight requests conclude on the old model reference, while subsequent requests immediately use the new version.
