@@ -1,0 +1,10 @@
+.venv/
+data/
+mlflow.db
+mlruns/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.joblib
+nohup.out
+logs/
