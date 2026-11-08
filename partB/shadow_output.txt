@@ -1,0 +1,6 @@
+requests sent to each server        : 200
+(i)   mean |prod - candidate|       : 9.48 minutes
+(ii)  share differing by > 10 min   : 35.0 %
+(iii) p95 latency prod (v1, :5101)  : 5.1 ms
+(iii) p95 latency cand (v2, :5102)  : 5.3 ms
+      mean prediction prod / cand   : 118.9 / 119.0 minutes

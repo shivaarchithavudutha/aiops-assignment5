@@ -1,0 +1,58 @@
+{
+  "criteria": {
+    "overall_mae_gain": true,
+    "latency_p95": true,
+    "no_rush_regression": true,
+    "no_rain_regression": true
+  },
+  "promote": true,
+  "details": {
+    "rel_gain": 0.4893603673684474,
+    "cand_p95_ms": 1.3563156495365547,
+    "rush_regression": -0.5640462036806323,
+    "rain_regression": -0.459222712715312
+  },
+  "prod_metrics": {
+    "mae": 11.9553,
+    "mae_rush": 19.679859894921194,
+    "mae_rain": 11.622736418511066,
+    "p95_ms": 1.496053750088322
+  },
+  "cand_metrics": {
+    "mae": 6.104850000000001,
+    "mae_rush": 8.579509632224168,
+    "mae_rain": 6.285311871227364,
+    "p95_ms": 1.3563156495365547
+  },
+  "thresholds": {}
+}
+{
+  "criteria": {
+    "overall_mae_gain": false,
+    "latency_p95": true,
+    "no_rush_regression": true,
+    "no_rain_regression": true
+  },
+  "promote": false,
+  "details": {
+    "rel_gain": 0.4893603673684474,
+    "cand_p95_ms": 1.5023693497369093,
+    "rush_regression": -0.5640462036806323,
+    "rain_regression": -0.459222712715312
+  },
+  "prod_metrics": {
+    "mae": 11.9553,
+    "mae_rush": 19.679859894921194,
+    "mae_rain": 11.622736418511066,
+    "p95_ms": 1.5451532504812346
+  },
+  "cand_metrics": {
+    "mae": 6.104850000000001,
+    "mae_rush": 8.579509632224168,
+    "mae_rain": 6.285311871227364,
+    "p95_ms": 1.5023693497369093
+  },
+  "thresholds": {
+    "min_rel_gain": 0.6
+  }
+}
