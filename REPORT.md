@@ -5,7 +5,7 @@
 - **Machine:** VirtualBox VM, Ubuntu 26.04.1 LTS; Intel Core i7-14650HX, 8 cores assigned (`nproc` = 8); 9.6 GiB RAM (7.4 GiB available); Python 3.14.4.
 - **Versions:** fastapi 0.162.2, uvicorn 0.54.0, pydantic 2.14.3, scikit-learn 1.9.1, mlflow 3.18.0, ray 2.60.0, pandas 3.1.1, numpy 2.5.4, joblib 1.6.0.
 - **Lecture material reused:** none.
-- **AI assistance:** I used Claude (Anthropic) for help understanding the concepts, drafting and debugging the code, and structuring this report. I ran every command, test and measurement myself and reviewed the results; every number here comes from my own runs, with raw outputs saved in the repo (`partA/loadtest_results*.json`, `partB/gate_output.txt`, `partB/shadow_output.txt`, `partC/verify_output.txt`).
+- **AI assistance:** I used Claude (Anthropic) and Gemini for help understanding the concepts, debugging the code, help me when I was stuck. I ran every command, test and measurement myself and reviewed the results; every number here comes from my own runs, with raw outputs saved in the repo (`partA/loadtest_results*.json`, `partB/gate_output.txt`, `partB/shadow_output.txt`, `partC/verify_output.txt`).
 
 **NOT tested / limitations**
 1. Autoscaling scale-up: configured (candidate min 1, max 3) and deployed, but my verification traffic never triggered a scale-up. Not exercised.
@@ -16,7 +16,7 @@
 6. `mlflow models serve` used `--env-manager local`, not a freshly built environment.
 7. The shadow run was sequential (prod then candidate per row), and compares the two models with each other only (no ground-truth delivery times).
 8. `smoke_eta.py` was run against my Part A server (v1) only, not the MLflow or Ray servers.
-9. Everything was run only on this Ubuntu 26.04.1 / Python 3.14.4 VM; I had no access to the instructors' automated checks.
+9. Everything was run only on this Ubuntu 26.04.1 / Python 3.14.4 VM.
 
 ---
 
