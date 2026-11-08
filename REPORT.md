@@ -1,238 +1,138 @@
-# SwiftParcel ETA Serving System - Report
+# SwiftParcel ETA Serving System - Report (AIOps Module 4, Assignment 5)
 
-## System Environment & Hardware Specifications
-* Environment Type: VirtualBox Virtual Machine
-* Operating System: Ubuntu 26.04.1 LTS
-* CPU Model: Intel(R) Core(TM) i7-14650HX
-* CPU Cores Assigned (nproc): 8 cores
-* Host / VM Memory (free -h): 9.6 GiB total (7.4 GiB available)
-* Python Version: Python 3.14.4
-* Core Dependency Versions:
-  * fastapi==0.162.2
-  * uvicorn==0.54.0
-  * pydantic==2.14.3
-  * scikit-learn==1.9.1
-  * mlflow==3.18.0
-  * ray==2.60.0
-  * pandas==3.1.1
-  * numpy==2.5.4
-  * joblib==1.6.0
+## 0. Machine, versions, honesty statement
 
----
+- **Machine:** VirtualBox VM, Ubuntu 26.04.1 LTS; Intel Core i7-14650HX, 8 cores assigned (`nproc` = 8); 9.6 GiB RAM (7.4 GiB available); Python 3.14.4.
+- **Versions:** fastapi 0.162.2, uvicorn 0.54.0, pydantic 2.14.3, scikit-learn 1.9.1, mlflow 3.18.0, ray 2.60.0, pandas 3.1.1, numpy 2.5.4, joblib 1.6.0.
+- **Lecture material reused:** none.
+- **AI assistance:** I used Claude (Anthropic) for help understanding the concepts, drafting and debugging the code, and structuring this report. I ran every command, test and measurement myself and reviewed the results; every number here comes from my own runs, with raw outputs saved in the repo (`partA/loadtest_results*.json`, `partB/gate_output.txt`, `partB/shadow_output.txt`, `partC/verify_output.txt`).
 
-## Part A: REST Service (FastAPI) & Load Testing
-
-### A3.1 Baseline Load Test Table
-Served model v1 (Ridge regression bundle) using a single Uvicorn worker process:
-
-| Concurrency | Requests | Throughput (RPS) | p50 (ms) | p95 (ms) | p99 (ms) | Errors | Replicas | Versions Served |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 1 | 1540 | 385.0 | 2.5 | 3.2 | 5.4 | 0 | 1 | {'v1': 1540} |
-| 2 | 139 | 34.8 | 4.4 | 606.1 | 1043.6 | 0 | 1 | {'v1': 139} |
-| 4 | 8 | 2.0 | 2565.1 | 2943.8 | 2943.8 | 0 | 1 | {'v1': 8} |
-| 8 | 26 | 6.5 | 1081.0 | 2347.5 | 2504.2 | 0 | 1 | {'v1': 26} |
-| 16 | 27 | 6.8 | 2781.5 | 3627.5 | 3722.9 | 0 | 1 | {'v1': 27} |
+**NOT tested / limitations**
+1. Autoscaling scale-up: configured (candidate min 1, max 3) and deployed, but my verification traffic never triggered a scale-up. Not exercised.
+2. With `--workers 2` each worker keeps its own metric counters, so `/metrics` shows only the worker that answered the scrape (no multiprocess aggregation).
+3. Load generator and server ran on the same VM, and the load generator is a single Python process, so numbers are noisy; I did not measure how much it limits the 2-worker results at high concurrency.
+4. My first 1-worker run showed throughput collapsing (385 to about 2-35 RPS at concurrency 2-16), which a normal saturation curve would not do. I suspect thread oversubscription (that terminal may have lacked `OMP_NUM_THREADS=1` from `env.sh`) but did not verify it. I re-ran the baseline with `env.sh` active and report the re-run.
+5. The 1-worker baseline (re-run), 2-worker run and batch-size runs were done in separate sessions, so ratios between them carry session-to-session noise.
+6. `mlflow models serve` used `--env-manager local`, not a freshly built environment.
+7. The shadow run was sequential (prod then candidate per row), and compares the two models with each other only (no ground-truth delivery times).
+8. `smoke_eta.py` was run against my Part A server (v1) only, not the MLflow or Ray servers.
+9. Everything was run only on this Ubuntu 26.04.1 / Python 3.14.4 VM; I had no access to the instructors' automated checks.
 
 ---
 
-### A3.2 Saturation Point and Capacity Under SLO (p95 <= 80 ms)
+## Part A - REST service (FastAPI)
 
-#### 1. Saturation Point
-Peak throughput occurs at concurrency 1 (385.0 RPS). Increasing concurrency to 2 causes throughput to drop sharply to 34.8 RPS (and ~2 to 7 RPS thereafter), while latency increases by orders of magnitude (p95 jumps from 3.2 ms to 606.1 ms). The single-worker service saturates immediately past concurrency 1.
+`eta_app.py` loads the model once at start-up (`ETA_MODEL`, default `data/eta_v1.joblib`), validates with pydantic (ranges, batch 1-500, infeasible rule: distance > 150 and n_stops > 20 gives 422), echoes or generates `X-Request-ID`, exposes `/healthz` and a hand-written Prometheus `/metrics`, and returns a generic 500 if inference raises. `python -m pytest partA`: **19 passed**.
 
-#### 2. Reasoning via Little's Law (L = lambda * W)
-In a closed-loop load generation model, L represents the number of concurrent clients, lambda is throughput in requests per second (RPS), and W is the average response time per request (W = L / lambda). At concurrency 1, W = 1 / 385.0 = 2.59 ms, which closely matches the measured p50 latency of 2.5 ms.
+### A3.1 Load test, v1, one worker, 4 s per level (`partA/loadtest_results.json`; 0 errors, v1 served in all rows)
 
-In a single-process Python/Uvicorn server running on a CPU-bound workload, Python's Global Interpreter Lock (GIL) constrains execution to a single core. Furthermore, because both the load generator and the Uvicorn server run inside the same VM, adding concurrent simulated clients causes CPU contention, thread starvation, and context-switching overhead. Once the server reaches maximum throughput (X_max), throughput stops growing. According to Little's Law, when lambda is fixed at X_max, average latency scales directly with queue depth: W = L / X_max. As concurrency increases, additional in-flight requests experience longer waits as the service approaches its throughput limit. This queueing effect, combined with CPU contention and scheduling overhead within the shared VM, is consistent with the observed increase in p95 latency to 606.1 ms at concurrency 2 and over 3600 ms at concurrency 16.
+| Concurrency | Requests | RPS | p50 (ms) | p95 (ms) | p99 (ms) |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 1 | 1570 | 392.5 | 2.5 | 2.9 | 3.8 |
+| 2 | 1699 | 424.8 | 4.6 | 5.8 | 7.9 |
+| 4 | 1339 | 334.8 | 11.2 | 19.3 | 22.9 |
+| 8 | 1180 | 295.0 | 26.1 | 46.0 | 57.5 |
+| 16 | 1281 | 320.2 | 47.8 | 84.5 | 102.0 |
 
-#### 3. Capacity Under SLO (p95 <= 80 ms)
-* Concurrency 1: p95 = 3.2 ms <= 80 ms (PASS)
-* Concurrency 2: p95 = 606.1 ms > 80 ms (FAIL)
-* Concurrency 4, 8, 16: All fail (p95 >= 2347.5 ms)
+### A3.2 Saturation point and capacity under SLO (p95 <= 80 ms)
 
-Service Capacity: The maximum supported throughput while respecting the p95 <= 80 ms latency objective is 385.0 RPS (at concurrency 1).
+**Saturation:** throughput peaks at concurrency 2 (424.8 RPS) and then settles around 295-335 RPS while latency keeps rising, so the single worker saturates at about 2 clients.
 
----
+**Little's Law (W = L / lambda):** predicted W vs measured p50 is 2.5 vs 2.5 ms (c=1), 4.7 vs 4.6 (c=2), 11.9 vs 11.2 (c=4), 27.1 vs 26.1 (c=8), 50.0 vs 47.8 (c=16). Once throughput is capped near X_max, extra clients only add waiting time (W = L / X_max), so latency grows roughly in proportion to concurrency. One uvicorn process runs Python on about one core (GIL) and the load generator shares the VM, which is consistent with the plateau; I did not profile it further.
 
-### A3.3 Cost Per Row: Batch 1 vs Batch 100 (Concurrency 1)
+**Capacity under the SLO:** p95 passes at c=1, 2, 4, 8 (2.9, 5.8, 19.3, 46.0 ms) and fails at c=16 (84.5 ms); interpolation puts the SLO edge at about 15 clients. The highest throughput among passing rows is 424.8 RPS (c=2), so single-worker capacity under the SLO is about **425 RPS**.
 
-Evaluated with duration = 4s at concurrency 1:
+### A3.3 Cost per row, batch 1 vs 100 (concurrency 1, 4 s)
 
-* Batch Size 1:
-  * Requests completed: 1597 | Throughput: 399.2 RPS
-  * Time per request: 1 / RPS = 1 / 399.2 = 2.505 ms
-  * Cost per row: 1000 / (399.2 * 1) = 2.51 ms/row
+| Batch | Requests | RPS | Time per request | ms per row = 1000 / (RPS x batch) |
+|:---:|:---:|:---:|:---:|:---:|
+| 1 | 1597 | 399.2 | 2.505 ms | 2.51 |
+| 100 | 1293 | 323.2 | 3.094 ms | 0.031 |
 
-* Batch Size 100:
-  * Requests completed: 1293 | Throughput: 323.2 RPS
-  * Time per request: 1 / RPS = 1 / 323.2 = 3.094 ms
-  * Cost per row: 1000 / (323.2 * 100) = 0.031 ms/row (31 microseconds/row)
+Every request pays a fixed cost independent of its size (HTTP handling, JSON parsing, middleware, thread hand-off, call into scikit-learn). A 100-row request pays it once, so cost per row drops about 81x. The extra 99 rows added only about 0.6 ms (roughly 6 microseconds per row), so the truly per-row work (validation, DataFrame construction, vectorised Ridge prediction) is small.
 
-* Analysis & Cost Explanation:
-  Every inbound HTTP request carries fixed framework and network overhead that is invariant to batch size: TCP/HTTP connection handling, JSON request payload deserialization, Pydantic model validation, middleware timing execution, and NumPy/DataFrame data marshalling. At Batch 1, this fixed overhead (~2.4 ms) is paid entirely by a single delivery prediction, resulting in 2.51 ms/row. At Batch 100, the payload of 100 delivery instances amortizes that fixed cost in a single network round-trip. Because scikit-learn's underlying matrix multiplications evaluate vectorized 2D arrays efficiently, computing 100 inferences takes only ~3.09 ms total compared to ~2.50 ms for 1 inference, reducing the marginal cost per row from 2.51 ms down to 0.031 ms/row (an ~81x efficiency gain).
+### A3.4 Change to roughly double capacity: `--workers 2` (`partA/loadtest_results_workers2.json`)
 
----
+| Concurrency | Requests | RPS | p50 (ms) | p95 (ms) | p99 (ms) |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 1 | 1481 | 370.2 | 2.6 | 3.4 | 4.6 |
+| 2 | 2734 | 683.5 | 2.8 | 3.5 | 4.2 |
+| 4 | 3369 | 842.2 | 4.6 | 6.3 | 8.5 |
+| 8 | 2582 | 645.5 | 11.4 | 22.0 | 27.8 |
+| 16 | 1996 | 499.0 | 30.0 | 58.0 | 76.2 |
 
-### A3.4 Optimization: Multi-Worker Deployment (--workers 2)
+Hypothesis: the GIL limits one process to about one core, so two worker processes should roughly double throughput. **Result:** peak throughput rose from 424.8 RPS (1 worker, c=2) to 842.2 RPS (2 workers, c=4), **1.98x**. At equal concurrency the gain was 1.6x (c=2), 2.5x (c=4), 2.2x (c=8) and 1.6x (c=16), and none at c=1 (370 vs 392 RPS) because one client keeps only one worker busy. With two workers p95 stays within the SLO at every level (58.0 ms at c=16 vs 84.5 ms with one worker). Throughput falls after c=4 (842, 645, 499); the single-process load generator is probably the bottleneck there, but I did not measure it.
 
-To address the single-worker GIL bottleneck, Uvicorn was configured with two worker processes, which the operating system can schedule independently across the VM's eight assigned CPU cores (uvicorn eta_app:app --port 8000 --log-level warning --workers 2).
-
-#### Multi-Worker Load Test Results:
-
-| Concurrency | Requests | Throughput (RPS) | p50 (ms) | p95 (ms) | p99 (ms) | Errors | Replicas | Versions Served |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| 1 | 1481 | 370.2 | 2.6 | 3.4 | 4.6 | 0 | 1 | {'v1': 1481} |
-| 2 | 2734 | 683.5 | 2.8 | 3.5 | 4.2 | 0 | 1 | {'v1': 2734} |
-| 4 | 3369 | 842.2 | 4.6 | 6.3 | 8.5 | 0 | 1 | {'v1': 3369} |
-| 8 | 2582 | 645.5 | 11.4 | 22.0 | 27.8 | 0 | 1 | {'v1': 2582} |
-| 16 | 1996 | 499.0 | 30.0 | 58.0 | 76.2 | 0 | 1 | {'v1': 1996} |
-
-#### Discussion & Measured Outcome:
-* Hypothesis: Spawning two Uvicorn worker processes creates two isolated OS processes with independent Python runtimes and GILs, allowing the operating system to distribute requests across two distinct CPU cores and roughly double peak throughput.
-* Empirical Result: Single-worker peak throughput was 385.0 RPS (at concurrency 1). Two-worker peak throughput reached 842.2 RPS (at concurrency 4), representing a 2.19x increase in peak capacity. Under two workers, the service maintained its SLO (p95 <= 80 ms) across all tested concurrency levels (p95 at concurrency 16 remained 58.0 ms, well below 80 ms).
-* Known Trade-offs & Limitations: Running in-process Prometheus metric counters across multiple Uvicorn workers causes each process to maintain its own independent counters in memory. Scraping GET /metrics only returns the metrics of whichever worker process handles that specific HTTP scrape request. A production deployment requires multiprocess mode via the PROMETHEUS_MULTIPROC_DIR environment variable or an external exporter.
+### A3.5 Why p95/p99 and not the mean
+Latency is right-skewed, so a few very slow requests barely move the mean but are what unlucky users experience. SLOs and alerts use tail percentiles because a fine average can hide a bad experience for 1 request in 20 or 1 in 100.
 
 ---
 
-### A3.5 Percentile-Based Monitoring (p95 / p99) vs Mean Latency
-Latency distributions in networked services are heavily right-skewed, characterized by long tails caused by scheduling jitter, socket stalls, and queuing delays that leave the arithmetic mean largely unaffected. Service Level Objectives and alerting thresholds are defined on tail percentiles (such as p95 and p99) because an acceptable average latency can conceal a degraded user experience occurring for 1 out of 20 or 1 out of 100 requests.
+## Part B - MLflow registry, gate and shadow
 
----
+### B1. Registration
+`eta_mlflow.py` defines a custom pyfunc (`EtaPyfunc`) returning a DataFrame with `eta_minutes` (one decimal) and `model_version`. Both models are logged with a signature, an input example and pinned `pip_requirements`, and registered as `eta-model` in a SQLite store (`mlflow.db`).
 
-## Limitations and Items Not Tested
-* Prometheus Worker Aggregation: Under --workers 2, the Prometheus metrics endpoint exposes per-process values rather than aggregated counters across all workers.
-* VM Measurement Noise: The load generator and server were co-located on the same VirtualBox virtual machine, causing CPU contention at higher client counts.
-* Implementation Basis: The implementation followed the starter contract specifications; no lecture material was reused.
-
----
-
-## Part B: MLflow Registry, Promotion Gate & Shadow Comparison
-
-### B1. Model Registration Table
-Both bundles were wrapped inside a custom MLflow `pyfunc` (`EtaPyfunc`) returning `eta_minutes` (rounded to one decimal place) and `model_version`, logged with input examples, model signatures, and pinned environment requirements to a local SQLite backend tracking store (`mlflow.db`).
-
-| Version | Model Alias | Bundle / Architecture |
+| Version | Alias | Bundle |
 |:---:|:---:|:---:|
-| 1 | `prod` | `v1` (Ridge Regression) |
-| 2 | `candidate` | `v2` (Gradient Boosting Regressor) |
+| 1 | prod | v1 (Ridge) |
+| 2 | candidate | v2 (Gradient Boosting) |
+
+### B2. Promotion gate
+`decide(prod, cand, min_rel_gain=0.03, max_p95_ms=10.0, max_slice_regression=0.05)` is pure and promotes only if: overall MAE improves by at least `min_rel_gain` (relative to prod); candidate single-row p95 <= `max_p95_ms`; and neither the rush-hour slice (hours 7-9, 16-19) nor the rain == 1 slice regresses by more than `max_slice_regression`. **Assumption:** slice regression is relative to prod's slice MAE (candidate <= prod x 1.05). `promotion_gate()` loads both aliases, evaluates on `make_data(2000, seed=99)` and measures p95 over 200 single-row predictions. `python -m pytest partB`: **9 passed** (boundaries: gain 3.1% vs 2.9%, p95 10.0 vs 10.01, rush slice 20.99 vs 21.01, rain-only regression, purity).
+
+- **Default thresholds** (`partB/gate_output.txt`): `promote: true`. MAE gain 48.94% (11.96 to 6.10 min, need >= 3%); candidate p95 1.36 ms (need <= 10); rush slice 19.68 to 8.58 min and rain slice 11.62 to 6.29 min, no regression.
+- **`--min-rel-gain 0.60`:** `promote: false`. The gain 0.489 is below 0.60, so `overall_mae_gain` fails while the other criteria pass (p95 1.50 ms in this run; latency varies slightly per run).
+
+### B3. Shadow comparison
+200 identical single-row requests from `data/eta_fresh.csv` were sent to prod (port 5101) and candidate (port 5102), sequentially (prod, then candidate, per row) after 5 warm-up calls (`partB/shadow_output.txt`):
+
+- (i) mean absolute difference: **9.48 min**
+- (ii) requests differing by more than 10 min: **35.0%**
+- (iii) p95 latency: prod **5.1 ms**, candidate **5.3 ms** (mean predictions 118.9 vs 119.0 min). These include the HTTP round trip, unlike the gate's in-process 1.36 ms.
+
+**Decision.** The models disagree noticeably, but this is expected: the gate showed v2 is much more accurate (MAE 11.96 to 6.10, rush hour 19.68 to 8.58), the mean predictions are almost identical, and v2 adds no meaningful latency (5.3 vs 5.1 ms p95). I would promote v2, through a sticky canary (Part C) rather than an all-at-once switch, so real delivery outcomes can be checked and customers see few abrupt ETA changes.
+
+**Why moving an alias does not change a running server:** an alias is only a pointer (name to version) in the registry database. `mlflow models serve -m models:/eta-model@prod` resolves it once at start-up, loads that version into memory and never re-reads the registry.
+
+**Two ways to pick up a new version without dropping requests:** (1) blue/green or rolling replacement: start new servers on the new version, wait for health checks, shift traffic, then drain and stop the old ones; (2) in-process hot reload: poll the registry (or use a webhook), load the new model in the background and atomically swap the reference while in-flight requests finish on the old one.
 
 ---
 
-### B2. Multi-Criteria Promotion Gate Results
+## Part C - Ray Serve sticky canary
 
-The pure decision function `decide()` evaluates relative overall MAE improvement ($\ge 3\%$), candidate single-row latency ($p95 \le 10\text{ ms}$), and slice regression ($\le 5\%$ relative degradation on rush-hour and rain slices). The slice regression rule is evaluated relative to production slice error ($MAE_{\text{cand}} \le MAE_{\text{prod}} \times 1.05$).
+`eta_ray.py`: `EtaModel` loads a bundle once per replica; prod has 2 replicas; the candidate has `autoscaling_config` (min 1, max 3, `target_ongoing_requests=2`, `upscale_delay_s=5`, `downscale_delay_s=60`). A FastAPI-ingress router takes `{"customer_id", "instances"}`, validates with the Part A rules and returns the output plus `"arm"`. Routing: `bucket(customer_id)` = first 8 bytes of `sha256("salt:customer_id")` mapped to [0, 1); the customer goes to the candidate if bucket < weight (so about `weight` of customers, not requests). `X-Beta: 1` forces the candidate. Fractional CPUs: prod 2 x 0.25, candidate up to 3 x 0.25, router 0.1, worst case 1.35 CPUs on 2 CPUs.
 
-#### 1. Default Thresholds (`min_rel_gain=0.03`, `max_p95_ms=10.0`, `max_slice_regression=0.05`):
-* **Gate Verdict:** `promote: true`
-* **Measured Metrics:**
-  * Relative MAE Gain: **48.94%** (prod MAE: 11.96 min vs cand MAE: 6.10 min; threshold $\ge 3\%$) $\rightarrow$ **PASS**
-  * Candidate Single-Row Latency: **1.36 ms** (threshold $\le 10.0\text{ ms}$) $\rightarrow$ **PASS**
-  * Rush Hour Slice (hours 7–9, 16–19): MAE dropped from 19.68 min to 8.58 min (-56.4% change) $\rightarrow$ **PASS (No regression)**
-  * Rain Slice (`rain == 1`): MAE dropped from 11.62 min to 6.29 min (-45.9% change) $\rightarrow$ **PASS (No regression)**
+### C2. Verification (`partC/verify_output.txt`; Ray with 2 CPUs, 1000 customer ids, weight 0.2)
 
-#### 2. Strict Threshold Run (`--min-rel-gain 0.60`):
-* **Gate Verdict:** `promote: false`
-* **Failure Analysis:** The relative gain criterion failed (`overall_mae_gain: false`) because the measured relative improvement of 48.94% (0.489) fell below the required 60.0% (0.60) threshold, while latency and slice criteria remained satisfied. This confirms the promotion gate strictly enforces its input parameters.
+| Check | Measured | Result |
+|:---:|:---|:---:|
+| (a) share within +-4 points of 0.2 | 0.190 (190 of 1000) | pass |
+| (b) 200 customers called twice | 0 changed arm | pass |
+| (c) same 200 after redeploying the identical app | 0 of 200 changed arm | pass |
+| (d) weight 0.2 to 0.5 | share 0.507; moved back to prod = 0; newly on candidate = 317 | pass |
+| (e) `X-Beta: 1` on 50 prod-routed customers | all `v2` with header, all `v1` without | pass |
 
----
-
-### B3. Shadow Comparison & Production Decision
-
-Evaluated over 200 identical single-row requests from `data/eta_fresh.csv` against both models concurrently:
-* **(i) Mean Absolute Difference ($|\text{prod} - \text{candidate}|$):** 9.48 minutes
-* **(ii) Share of Requests Differing by $> 10$ minutes:** 35.0%
-* **(iii) Inference Latency (p95):**
-  * `prod` (v1 on port 5101): **5.1 ms**
-  * `candidate` (v2 on port 5102): **5.3 ms**
-* **Overall Mean Predictions:** `prod`: 118.9 min | `candidate`: 119.0 min
-
-#### Candidate Promotion Decision:
-The shadow run reveals a notable 9.48-minute mean absolute difference, with 35.0% of predictions deviating by more than 10 minutes between `v1` and `v2`. This divergence is expected and desirable: the promotion gate proved that candidate `v2` reduces overall prediction error by 48.9% (cutting MAE from 11.96 down to 6.10 minutes) and significantly improves performance on challenging slices such as rush-hour periods (19.68 to 8.58 minutes), rather than behaving erratically. Furthermore, `v2` introduces virtually zero latency penalty, maintaining a 5.3 ms p95 compared to `v1`'s 5.1 ms—well beneath the 10 ms gate threshold. Based on these empirical metrics, candidate `v2` should be promoted to production. Rather than executing an abrupt all-at-once switch, the rollout should proceed via a controlled sticky canary (as in Part C) to monitor real-time delivery outcomes while reducing abrupt ETA changes for active customers.
-
-#### Alias Immutability in Running Servers:
-Moving an alias in the MLflow Model Registry changes only the metadata pointer in the backend database (`mlflow.db`). When `mlflow models serve -m "models:/eta-model@prod"` starts, it resolves the alias to a specific version exactly once, pulls the model artifacts, instantiates the Python model object in RAM, and serves traffic from memory. Because the running server process does not continually poll the tracking database, reassigned aliases have no effect on an existing server process.
-
-#### Zero-Downtime Update Strategies:
-1. **Blue/Green or Rolling Deployment:** Spin up a new model server fleet resolving the newly updated alias. Once the new instances pass automated health and smoke checks, the routing layer (or load balancer) shifts inbound traffic to the new instances, followed by draining and terminating the legacy servers without dropping in-flight requests.
-2. **In-Process Dynamic Hot-Reloading:** The model service worker runs a background polling thread or listens for webhook notifications from the registry. When an alias target changes, it downloads and instantiates the new model object in memory and performs an atomic pointer swap. In-flight requests conclude on the old model reference, while subsequent requests immediately use the new version.
+### C3. Short answers
+1. **Why not `hash()`?** Python randomises string hashing per process (`PYTHONHASHSEED`). Replicas, or one replica after a restart or redeploy, would give different values for the same id, so customers would switch arms. `sha256` is deterministic and uniform across processes and restarts.
+2. **Why stickiness matters:** (i) a customer seeing ETAs from two different models on repeat visits gets inconsistent estimates and loses trust; (ii) in the experiment each customer must be in exactly one arm, otherwise both models contaminate every customer's outcomes and per-customer metrics cannot be attributed.
+3. **Autoscaling parameters:** `min_replicas=1` because the candidate only gets about `weight` of customers; `max_replicas=3` caps it at 0.75 CPU so the app stays at or below 1.35 CPUs; `target_ongoing_requests=2` because predictions take milliseconds, so scale only when a queue builds; `upscale_delay_s=5` reacts to real surges but ignores blips; `downscale_delay_s=60` keeps replicas warm (model loading is costly) and avoids flapping. These are reasoned, not tuned, since autoscaling was not exercised.
 
 ---
 
-## Part C: Ray Serve Sticky Canary Deployment
+## Part D - Release gate
 
-### C1 & C2. Canary Architecture and Verification Results
-The service was constructed using Ray Serve on a 2-CPU constraint, deploying:
-* **Production Deployment (`prod`):** Fixed 2 replicas reserving `num_cpus=0.25` each (0.5 CPU total).
-* **Candidate Deployment (`candidate`):** Autoscaling replica configuration (`min_replicas=1`, `max_replicas=3`) reserving `num_cpus=0.25` each (0.25 to 0.75 CPU allocated when scaled).
-* **Canary Router (FastAPI Ingress):** Deterministic routing based on SHA-256 hash buckets reserving `num_cpus=0.1` (worst-case compute footprint is $0.5 + 0.75 + 0.1 = 1.35$ CPUs, comfortably fitting within the 2-CPU allocation while leaving overhead for Ray core system actors).
+### D1. Smoke test (`partD/smoke_eta.py --url ... --expect-version ... [--max-p95-ms 80]`)
+Eight checks, exit 0 on success and 1 on failure: valid request returns 200 with a positive ETA; served version equals `--expect-version`; a batch of 3 equals the same rows sent singly; **model sanity**: longer distance, heavier traffic and more stops never give a shorter ETA (0.5-min tolerance); invalid input (distance -5) returns 422; p95 of 30 sequential requests <= limit.
 
-#### Automated Verification Run (`verify_ray.py` output):
-All five automated verification assertions executed cleanly over 1,000 unique customer identifiers:
+- `--expect-version v1` on my Part A server: `SMOKE TEST PASSED (8/8 checks)`, exit code 0 (ETA 102.0 min; distance [5, 20, 50, 100] km gives [37.5, 76.2, 153.6, 282.6] min; traffic [0.1, 0.5, 0.9] gives [84.9, 102.0, 119.1]; stops [2, 8, 15] gives [89.0, 115.0, 145.3]; 422 on invalid input; p95 5.1 ms vs limit 80).
+- `--expect-version v2` against the same v1 server: `[FAIL] model version matches --expect-version: served=v1 expected=v2`, `SMOKE TEST FAILED (7/8 checks)`, exit code 1.
 
-| Check | Objective | Verification Criterion | Measured Output | Status |
-|:---:|:---|:---|:---:|:---:|
-| **(a)** | Traffic Share | Candidate share within $\pm 4\%$ of weight ($0.20$) | **0.190 (19.0%, 190 / 1000)** | **PASS** |
-| **(b)** | Repeat Stickiness | Same customer called twice gets identical arm | **0 changed arm (200 / 200 consistent)** | **PASS** |
-| **(c)** | Redeploy Stability | Arms persist identically across application redeploy | **0 changed arm (200 / 200 consistent)** | **PASS** |
-| **(d)** | Monotonic Ramp | Weight raised $0.2 \to 0.5$; no candidate falls back | **0 moved back to prod (317 added to cand)** | **PASS** |
-| **(e)** | Header Override | `X-Beta: 1` forces candidate arm regardless of hash | **50 / 50 routed to candidate (`v2`)** | **PASS** |
+### D2. Abort criteria for a 10% canary of v2
 
----
-
-### C3. Technical Rationale & Short Answers
-
-#### 1. Why Python's Built-in `hash()` is Unsuitable
-Python's built-in `hash()` function applies a process-randomized seed on startup (via `PYTHONHASHSEED`) to guard against hash-collision denial-of-service attacks. Consequently, different worker replicas or the same replica restarted across redeployments compute completely different integer values for the same `customer_id`. Using `hash()` would break customer stickiness, causing repeat visits to alternate unpredictably between `v1` and `v2`. Using `hashlib.sha256` ensures deterministic, uniform bucketing across all processes, restarts, and nodes.
-
-#### 2. Why Stickiness Matters for ETA Products & Analysis
-* **User Trust & UX Consistency:** Delivery ETAs demand temporal consistency; non-sticky routing would cause an active customer tracking an order to receive oscillating delivery estimates across page refreshes, eroding confidence in the service.
-* **Causal Experimentation & Cohort Isolation:** In an A/B or canary experiment, routing requests randomly would contaminate user cohorts across both models, preventing clean attribution of business metrics (e.g., cancellation rates). Monotonic sticky hashing also ensures that expanding rollout weights retains earlier candidate cohorts without mid-flight disruption.
-
-#### 3. Autoscaling Configuration Justification
-We set `min_replicas=1` because candidate traffic starts at a fractional share (~20%), avoiding idle compute while ensuring an active replica is warm without cold-start latency. We set `max_replicas=3` to enforce an upper CPU reservation ceiling of 0.75 CPU, guaranteeing the combined application stays under 1.35 CPUs within our 2-CPU constraint. The autoscaler targets `target_ongoing_requests=2` concurrent in-flight requests per replica to maintain low tail latencies during load spikes. Finally, `upscale_delay_s=5` responds rapidly to genuine traffic bursts, while `downscale_delay_s=60` holds replicas warm to prevent rapid flapping and unnecessary model reload overhead.
-
----
-
-### Part C Limitations and Items Not Tested
-* **Autoscaling Scale-Up Under Load:** The candidate autoscaling configuration was deployed and verified, but the verification workload did not generate enough sustained concurrency to trigger a replica scale-up event from 1 to 2 or 3. Scale-up behavior under heavy load remains configured but not exercised.
-
----
-
-## Part D: Automated Release Gate & Abort Criteria
-
-### D1. Smoke Test Execution (`smoke_eta.py`)
-
-The smoke test implements automated release gating before real traffic is routed to a newly deployed service. It evaluates basic availability, release identity, batch-single consistency, domain monotonicity, input validation, and latency SLO compliance.
-
-#### Verification Runs:
-
-1. **Passing Release Check (`--expect-version v1`):**
-   * Output: `SMOKE TEST PASSED (8/8 checks)`
-   * `[PASS]` HTTP 200 with valid positive ETA (`102.0 min`)
-   * `[PASS]` Model version matched expected release (`v1`)
-   * `[PASS]` Batch consistency: `batch=[37.5, 127.8, 256.8]` matched single evaluations
-   * `[PASS]` Distance monotonicity: `[5, 20, 50, 100] km` $\to$ `[37.5, 76.2, 153.6, 282.6] min`
-   * `[PASS]` Traffic monotonicity: `[0.1, 0.5, 0.9]` $\to$ `[84.9, 102.0, 119.1] min`
-   * `[PASS]` Stop count monotonicity: `[2, 8, 15]` $\to$ `[89.0, 115.0, 145.3] min`
-   * `[PASS]` Input validation: out-of-range negative distance returned HTTP 422
-   * `[PASS]` Latency threshold: measured $p95 = 5.1\text{ ms} \le 80.0\text{ ms}$
-   * **Exit Code:** `0` (Deployment approved)
-
-2. **Negative Control Verification (`--expect-version v2` against v1 server):**
-   * Output: `[FAIL] model version matches --expect-version: served=v1 expected=v2`
-   * Result: `SMOKE TEST FAILED (7/8 checks)`
-   * **Exit Code:** `1` (Deployment automatically blocked)
-
----
-
-### D2. Four Production Canary Abort Criteria (10% Rollout of v2)
-
-During a 10% canary rollout of `v2`, the deployment controller monitors real-time telemetry and is configured to trigger an automatic rollback to `v1` if any of the following conditions are met:
-
-| # | Telemetry Metric | Rollback / Abort Threshold | Evaluation Window | Rationale |
-|:---:|:---|:---|:---|:---|
-| **1** | **HTTP 5xx Server Error Rate** | Canary error rate $> 1.0\%$ (or $> 2\times$ production baseline error rate) | Rolling 5-minute window (minimum 200 canary requests) | Detects unhandled runtime exceptions, memory faults, or worker crashes introduced by candidate code under live traffic. |
-| **2** | **Canary Tail Latency (p95)** | $p95 > 80\text{ ms}$ (SLO breach) or $> 1.5\times$ baseline `prod` p95 | 2 consecutive 5-minute rolling evaluation windows | Prevents customer latency degradation. Requiring two consecutive breaches reduces premature rollbacks caused by temporary network spikes. |
-| **3** | **Live Prediction Divergence** | Mean Absolute Difference against shadow $> 12\text{ min}$, or $> 50\%$ of requests differing by $> 10\text{ min}$ | Rolling 15-minute window (minimum 500 mirrored requests) | Detects unexpected distribution drift or inconsistencies in feature transformations that cause predictions to deviate substantially from offline shadow baselines. |
-| **4** | **Ground-Truth Delivery Error (Real-Time MAE)** | Candidate MAE degrades $> 5\%$ relative to `prod` overall or on rush-hour/rain slices | Rolling 1-hour window of completed deliveries (minimum 500 completed parcels per arm) | Evaluates actual prediction accuracy against final package delivery times once couriers log completion, helping protect performance on critical customer-sensitive slices. |
-
+| # | Metric | Abort threshold | Window |
+|:---:|:---|:---|:---|
+| 1 | HTTP 5xx rate of canary traffic | above 1%, or above 2x prod's rate | rolling 5 min, at least 200 canary requests |
+| 2 | Canary p95 latency | above 80 ms (SLO) or above 1.5x prod's p95 | 2 consecutive 5-min windows |
+| 3 | Prediction divergence from prod on mirrored requests | mean absolute difference above 12 min (shadow baseline 9.5), or over 50% of requests differing by more than 10 min (baseline 35%) | rolling 15 min, at least 500 mirrored requests |
+| 4 | Live accuracy once real delivery times arrive: canary MAE vs prod, overall and on rush-hour / rain slices | canary worse than prod by more than 5% overall or on any slice | rolling 1 hour, at least 500 completed deliveries per arm |
