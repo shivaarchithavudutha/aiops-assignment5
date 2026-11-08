@@ -155,3 +155,43 @@ Moving an alias in the MLflow Model Registry changes only the metadata pointer i
 #### Zero-Downtime Update Strategies:
 1. **Blue/Green or Rolling Deployment:** Spin up a new model server fleet resolving the newly updated alias[cite: 19]. Once the new instances pass automated health and smoke checks, the routing layer (or load balancer) shifts inbound traffic to the new instances, followed by draining and terminating the legacy servers without dropping in-flight requests[cite: 19].
 2. **In-Process Dynamic Hot-Reloading:** The model service worker runs a background polling thread or listens for webhook notifications from the registry[cite: 19]. When an alias target changes, it downloads and instantiates the new model object in memory and performs an atomic pointer swap[cite: 19]. In-flight requests conclude on the old model reference, while subsequent requests immediately use the new version[cite: 19].
+
+---
+
+## Part C: Ray Serve Sticky Canary Deployment
+
+### C1 & C2. Canary Architecture and Verification Results
+The service was constructed using Ray Serve on a 2-CPU constraint, deploying:
+* **Production Deployment (`prod`):** Fixed 2 replicas reserving `num_cpus=0.25` each (0.5 CPU total).
+* **Candidate Deployment (`candidate`):** Autoscaling replica configuration (`min_replicas=1`, `max_replicas=3`) reserving `num_cpus=0.25` each (0.25 to 0.75 CPU allocated when scaled).
+* **Canary Router (FastAPI Ingress):** Deterministic routing based on SHA-256 hash buckets reserving `num_cpus=0.1` (worst-case compute footprint is $0.5 + 0.75 + 0.1 = 1.35$ CPUs, comfortably fitting within the 2-CPU allocation while leaving overhead for Ray core system actors).
+
+#### Automated Verification Run (`verify_ray.py` output):
+All five automated verification assertions executed cleanly over 1,000 unique customer identifiers:
+
+| Check | Objective | Verification Criterion | Measured Output | Status |
+|:---:|:---|:---|:---:|:---:|
+| **(a)** | Traffic Share | Candidate share within $\pm 4\%$ of weight ($0.20$) | **0.190 (19.0%, 190 / 1000)** | **PASS** |
+| **(b)** | Repeat Stickiness | Same customer called twice gets identical arm | **0 changed arm (200 / 200 consistent)** | **PASS** |
+| **(c)** | Redeploy Stability | Arms persist identically across application redeploy | **0 changed arm (200 / 200 consistent)** | **PASS** |
+| **(d)** | Monotonic Ramp | Weight raised $0.2 \to 0.5$; no candidate falls back | **0 moved back to prod (317 added to cand)** | **PASS** |
+| **(e)** | Header Override | `X-Beta: 1` forces candidate arm regardless of hash | **50 / 50 routed to candidate (`v2`)** | **PASS** |
+
+---
+
+### C3. Technical Rationale & Short Answers
+
+#### 1. Why Python's Built-in `hash()` is Unsuitable
+Python's built-in `hash()` function applies a process-randomized seed on startup (via `PYTHONHASHSEED`) to guard against hash-collision denial-of-service attacks. Consequently, different worker replicas or the same replica restarted across redeployments compute completely different integer values for the same `customer_id`. Using `hash()` would break customer stickiness, causing repeat visits to alternate unpredictably between `v1` and `v2`. Using `hashlib.sha256` ensures deterministic, uniform bucketing across all processes, restarts, and nodes.
+
+#### 2. Why Stickiness Matters for ETA Products & Analysis
+* **User Trust & UX Consistency:** Delivery ETAs demand temporal consistency; non-sticky routing would cause an active customer tracking an order to receive oscillating delivery estimates across page refreshes, eroding confidence in the service.
+* **Causal Experimentation & Cohort Isolation:** In an A/B or canary experiment, routing requests randomly would contaminate user cohorts across both models, preventing clean attribution of business metrics (e.g., cancellation rates). Monotonic sticky hashing also ensures that expanding rollout weights retains earlier candidate cohorts without mid-flight disruption.
+
+#### 3. Autoscaling Configuration Justification
+We set `min_replicas=1` because candidate traffic starts at a fractional share (~20%), avoiding idle compute while ensuring an active replica is warm without cold-start latency. We set `max_replicas=3` to enforce an upper CPU reservation ceiling of 0.75 CPU, guaranteeing the combined application stays under 1.35 CPUs within our 2-CPU constraint. The autoscaler targets `target_ongoing_requests=2` concurrent in-flight requests per replica to maintain low tail latencies during load spikes. Finally, `upscale_delay_s=5` responds rapidly to genuine traffic bursts, while `downscale_delay_s=60` holds replicas warm to prevent rapid flapping and unnecessary model reload overhead.
+
+---
+
+### Part C Limitations and Items Not Tested
+* **Autoscaling Scale-Up Under Load:** The candidate autoscaling configuration was deployed and verified, but the verification workload did not generate enough sustained concurrency to trigger a replica scale-up event from 1 to 2 or 3. Scale-up behavior under heavy load remains configured but not exercised.

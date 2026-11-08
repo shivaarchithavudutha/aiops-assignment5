@@ -1,0 +1,9 @@
+Ray resources: {'CPU': 2.0, 'node:10.0.2.15': 1.0, 'memory': 4486422528.0, 'object_store_memory': 1922752512.0, 'node:__internal_head__': 1.0}
+(a) weight=0.2 over 1000 distinct customers: candidate share = 0.190 (190 of 1000)
+(b) 200 customers called twice: 0 changed arm
+(c) after redeploying identical app: 0 of 200 changed arm
+(d) weight 0.2 -> 0.5: new candidate share = 0.507; moved back to prod = 0; newly moved to candidate = 317
+(e) 50 prod-routed customers with X-Beta: 1 -> arms {'v2'}; without header -> {'v1'}
+
+ALL CHECKS PASSED
+[33m(raylet)[0m Task ServeController.graceful_shutdown failed. There are infinite retries remaining, so the task will be retried. Error: The actor is dead because it was killed by `ray.kill`.
