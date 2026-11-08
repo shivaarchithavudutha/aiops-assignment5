@@ -125,16 +125,6 @@ echo "exit code: $?"
 
 The abort criteria for a 10% canary are in `REPORT.md` (Part D).
 
-## Common problems
-
-| Symptom | Fix |
-|---|---|
-| `ModuleNotFoundError` for `eta_app`, `eta_data`, `eta_mlflow`, `eta_ray` | Run `source env.sh` from the repository root in this terminal. |
-| `FileNotFoundError: data/eta_v1.joblib` | Run `python eta_data.py` from the repository root. |
-| `Address already in use` | Find the process with `ss -ltnp \| grep 8000` and stop it (Ctrl+C or `pkill -f uvicorn`). Part C needs port 8000 free. |
-| MLflow alias not found | Run `register` first, and use `source env.sh` in every terminal so they share the same `mlflow.db`. |
-| Load-test numbers look strange | Make sure `source env.sh` was run in the server terminal (`echo $OMP_NUM_THREADS` should print 1), close other applications, and repeat. |
-
 ## AI assistance disclosure
 
-I used Claude (Anthropic) for help understanding the concepts, drafting and debugging the code, and structuring the report. I ran all commands, tests and measurements myself on my VM and reviewed the results; every number in `REPORT.md` comes from my own runs, with raw outputs saved in this repository.
+I used Claude (Anthropic) and Gemini for help understanding the concepts, debugging the code, and help me when I was struck. I ran all commands, tests and measurements myself on my VM and reviewed the results; every number in `REPORT.md` comes from my own runs, with raw outputs saved in this repository.
